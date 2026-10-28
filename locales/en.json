@@ -1,0 +1,14 @@
+{
+  "name": "English",
+  "strings": {
+    "refresh": "Refresh", "menu": "Menu", "language": "Language", "error": "Error", "bad_reply": "Unexpected reply",
+    "battery": "Battery", "firmware": "Firmware", "mac": "MAC", "ble_mac": "MAC (BLE)",
+    "noise": "Noise control", "off": "Off", "anc_high": "ANC High", "anc_medium": "ANC Medium",
+    "wind": "Wind", "ambient": "Ambient", "ambient_level": "Ambient level",
+    "audio": "Sound mode", "game": "Game", "music": "Music", "spatial": "Spatial",
+    "eq": "Equalizer", "Dynamic": "Dynamic", "Vocal": "Vocal", "Bass": "Bass", "Treble": "Treble", "Custom": "Custom",
+    "codec": "Audio codec (A2DP)",
+    "open": "Open window", "quit": "Quit", "connecting": "Connecting…"
+  },
+  "errors": {}
+}

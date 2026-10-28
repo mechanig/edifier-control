@@ -1,0 +1,23 @@
+{
+  "name": "Українська",
+  "strings": {
+    "refresh": "Оновити", "menu": "Меню", "language": "Мова", "error": "Помилка", "bad_reply": "Неочікувана відповідь",
+    "battery": "Батарея", "firmware": "Firmware", "mac": "MAC", "ble_mac": "MAC (BLE)",
+    "noise": "Шумоподавлення", "off": "Вимк.", "anc_high": "ANC Високий", "anc_medium": "ANC Середній",
+    "wind": "Вітер", "ambient": "Прозорість", "ambient_level": "Рівень прозорості",
+    "audio": "Режим звуку", "game": "Гра", "music": "Музика", "spatial": "Просторовий",
+    "eq": "Еквалайзер", "Dynamic": "Динамічний", "Vocal": "Вокал", "Bass": "Бас", "Treble": "Високі", "Custom": "Власний",
+    "codec": "Аудіокодек (A2DP)",
+    "open": "Відкрити вікно", "quit": "Вийти", "connecting": "Підключення…"
+  },
+  "errors": {
+    "Bluetooth/system error": "Помилка Bluetooth або системи",
+    "no 'EDIFIER BLE' device found": "Навушники не знайдено. Вони увімкнені й підключені до цього ПК?",
+    "BLE connect failed": "Не вдалося підключитись по BLE",
+    "GATT services not resolved": "Навушники не відповідають (сервіси BLE недоступні)",
+    "Edifier GATT service not found": "На цьому пристрої немає сервісу керування Edifier",
+    "headphones did not apply the setting": "Навушники не застосували налаштування",
+    "Edifier audio card not found": "Аудіопристрій Edifier не знайдено в PipeWire",
+    "not offered by the device": "Цей кодек недоступний на пристрої"
+  }
+}

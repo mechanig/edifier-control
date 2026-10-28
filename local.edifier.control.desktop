@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Edifier Control — W820NB Plus (2025)
+GenericName=Headphone control
+Comment=Control Edifier headphones: noise cancelling, sound mode, equalizer
+Comment[uk]=Керування навушниками Edifier: шумоподавлення, режим звуку, еквалайзер
+Exec=edifier-control-gui
+Icon=edifier-control
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Audio;
+Keywords=Edifier;headphones;ANC;noise;equalizer;LDAC;
+Keywords[uk]=Edifier;навушники;шумоподавлення;еквалайзер;

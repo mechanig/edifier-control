@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""Edifier Control — W820NB Plus (2025): control Edifier headphones from Linux (BLE GATT via BlueZ D-Bus, needs only PyGObject).
+
+Protocol from github.com/wh201906/mEDIFIER and the W820NB Plus fork github.com/Klinkore/mEDIFIER.
+"""
+import fcntl, json, os, shutil, subprocess, sys, time
+from gi.repository import Gio, GLib
+
+__version__ = "0.0.2"
+BLUEZ = "org.bluez"
+RX_SUFFIX, TX_SUFFIX = "2-1a48-11e9-ab14-d663bd873d93", "3-1a48-11e9-ab14-d663bd873d93"
+SPECIAL_RX, SPECIAL_TX = "48090001-1a48-11e9-ab14-d663bd873d93", "48090002-1a48-11e9-ab14-d663bd873d93"
+XOR = 0xA5
+# W820NB Plus noise modes (payload of cmd C1 after 0xB5)
+MODES = {"normal": 0xA0, "anc": 0xA4, "anc-medium": 0xA7, "wind": 0xA6, "ambient": 0xA1}
+ALIASES = {"off": "normal", "standard": "normal", "strong": "anc", "noise": "anc", "nc": "anc",
+           "medium": "anc-medium", "transparency": "ambient", "aware": "ambient"}
+# sound mode (cmd 09 set / 08 read) and equaliser preset (cmd C4 set / D5 read), payload = one byte
+AUDIO = {"game": 0xA4, "music": 0xA5, "spatial": 0xA7}
+EQ = {"edifier": 0xA5, "dynamic": 0xA4, "vocal": 0xA7, "bass": 0xA6, "treble": 0xA1, "custom": 0xA0}
+# ambient level -3..+3 -> payload byte offset from 0xA0
+AMBIENT_OFFSET = {-3: 4, -2: 1, -1: 0, 0: 3, 1: 2, 2: 13, 3: 12}
+# A2DP codec is chosen by the PC (PipeWire profile), not by the headphones
+CODECS = {"ldac": "a2dp-sink", "sbc-xq": "a2dp-sink-sbc_xq", "sbc": "a2dp-sink-sbc"}
+CYCLE = ("normal", "anc", "ambient")
+USAGE = """usage: edifier-control {normal|anc|anc-medium|wind|ambient|cycle|status|battery}
+       edifier-control ambient-level {-3..3}
+       edifier-control audio {game|music|spatial}
+       edifier-control eq {edifier|dynamic|vocal|bass|treble|custom}
+       edifier-control codec [ldac|sbc-xq|sbc]
+       edifier-control --version"""
+
+# command codes
+CMD_NOISE, CMD_BATTERY, CMD_FIRMWARE, CMD_AUDIO_READ, CMD_AUDIO_SET, CMD_EQ_READ, CMD_EQ_SET = \
+    0xC1, 0xD0, 0xC6, 0x08, 0x09, 0xD5, 0xC4
+CMD_NOISE_READ = 0xCC
+
+
+def _invert(table):
+    return {v: k for k, v in table.items()}
+
+
+MODE_NAMES, AUDIO_NAMES, EQ_NAMES, LEVEL_BY_OFFSET = _invert(MODES), _invert(AUDIO), _invert(EQ), _invert(AMBIENT_OFFSET)
+_bus = None
+
+
+def bus():
+    """System bus, connected on first use so the pure protocol helpers can be imported without D-Bus."""
+    global _bus
+    if _bus is None:
+        _bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+    return _bus
+
+
+def die(msg):
+    sys.exit(f"edifier-control: {msg}")
+
+
+class single_instance:
+    """Serialise commands: the headphones have one BLE link, and the window and the indicator both call us."""
+    PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "edifier-control.lock")
+
+    def __enter__(self):
+        self.f = open(self.PATH, "w")
+        for _ in range(400):  # wait up to 40 s for the previous command
+            try:
+                fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                time.sleep(0.1)
+        die("another edifier-control command is still running")
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
+def packet(cmd: int, payload: bytes = b"") -> bytes:
+    """AA EC cmd 00 len payload sum8"""
+    data = bytes([0xAA, 0xEC, cmd, 0x00, len(payload)]) + payload
+    return data + bytes([sum(data) & 0xFF])
+
+
+def parse(buf: bytes):
+    """Yield (cmd, payload) from replies shaped BB EC cmd status len payload sum8."""
+    i = 0
+    while i + 6 <= len(buf):
+        if buf[i] != 0xBB or buf[i + 1] != 0xEC:
+            i += 1
+            continue
+        n = 6 + buf[i + 4]
+        if i + n > len(buf):
+            break
+        pkt = buf[i:i + n]
+        if sum(pkt[:-1]) & 0xFF == pkt[-1]:
+            yield pkt[2], pkt[5:-1]
+        i += n
+
+
+def call(path, iface, method, args=None, dest=BLUEZ, timeout=15000):
+    return bus().call_sync(dest, path, iface, method, args, None, Gio.DBusCallFlags.NONE, timeout)
+
+
+def managed():
+    return call("/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects").unpack()[0]
+
+
+def device_props(path):
+    return call(path, "org.freedesktop.DBus.Properties", "GetAll", GLib.Variant("(s)", ("org.bluez.Device1",))).unpack()[0]
+
+
+# ---------------------------------------------------------------- BLE transport
+class BLE:
+    GATT = "org.bluez.GattCharacteristic1"
+
+    def __init__(self):
+        self.rx = b""
+        self.dev = self._find_device()
+        self._connect()
+        self.address = device_props(self.dev)["Address"]
+        self.tx_path, self.rx_path = self._find_chars()
+        self._sub = bus().signal_subscribe(BLUEZ, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                           self.rx_path, None, Gio.DBusSignalFlags.NONE, self._on_change)
+        call(self.rx_path, self.GATT, "StartNotify")
+
+    @staticmethod
+    def _find_device():
+        mac = os.environ.get("EDIFIER_BLE_MAC")
+
+        def lookup():
+            for path, ifs in managed().items():
+                d = ifs.get("org.bluez.Device1")
+                if d and (d["Address"] == mac if mac else d.get("Name") == "EDIFIER BLE"):
+                    return path
+
+        # not known to BlueZ right now: scan briefly (the headset advertises as "EDIFIER BLE")
+        path = lookup()
+        if not path:
+            subprocess.run(["bluetoothctl", "--timeout", "8", "scan", "on"], capture_output=True)
+            path = lookup()
+        return path or die("no 'EDIFIER BLE' device found (headphones on? connected to a host?)")
+
+    def _connect(self):
+        if not device_props(self.dev)["Connected"]:
+            for attempt in range(3):  # BlueZ occasionally aborts the first LE connection attempt
+                try:
+                    call(self.dev, "org.bluez.Device1", "Connect", timeout=20000)
+                    break
+                except GLib.Error as e:
+                    if attempt == 2:
+                        die(f"BLE connect failed: {e.message}")
+                    time.sleep(0.5)
+        for _ in range(50):
+            if device_props(self.dev)["ServicesResolved"]:
+                return
+            time.sleep(0.1)
+        die("GATT services not resolved")
+
+    def _find_chars(self):
+        tx = rx = None
+        for path, ifs in managed().items():
+            c = ifs.get(self.GATT)
+            if not c or not path.startswith(self.dev + "/"):
+                continue
+            u, flags = c["UUID"], c["Flags"]
+            if "notify" in flags and (u == SPECIAL_RX or (u.endswith(RX_SUFFIX) and u != SPECIAL_TX)):
+                rx = path
+            if "write" in flags and (u == SPECIAL_TX or (u.endswith(TX_SUFFIX) and u != SPECIAL_RX)):
+                tx = path
+        return (tx, rx) if tx and rx else die("Edifier GATT service not found on this device")
+
+    def _on_change(self, _conn, _sender, _path, _iface, _signal, params):
+        value = params.unpack()[1].get("Value")
+        if value:
+            self.rx += bytes(value)
+
+    def _write(self, data: bytes):
+        call(self.tx_path, self.GATT, "WriteValue",
+             GLib.Variant("(aya{sv})", (list(data), {"type": GLib.Variant("s", "command")})))
+
+    def send(self, data: bytes):
+        # this model wants the packet first as an ASCII hex string, then as raw bytes
+        self._write(data.hex().encode())
+        time.sleep(0.1)
+        self._write(data)
+
+    def transact(self, cmd: int, payload: bytes = b"", wait=1.5):
+        """Send a command; return the payload of its reply (replies echo the command code), or None."""
+        self.rx = b""
+        self.send(packet(cmd, payload))
+        ctx, end = GLib.MainContext.default(), time.time() + wait
+        while time.time() < end:
+            ctx.iteration(False)
+            for reply_cmd, reply in parse(self.rx):
+                if reply_cmd == cmd:
+                    return reply
+            time.sleep(0.01)
+        return None
+
+    def close(self):
+        bus().signal_unsubscribe(self._sub)
+        try:
+            call(self.rx_path, self.GATT, "StopNotify")
+        except GLib.Error:
+            pass
+
+
+# ---------------------------------------------------------------- commands
+def classic_mac():
+    """Address of the headphones' classic (audio) profile; the BLE address differs in one nibble."""
+    for ifs in managed().values():
+        d = ifs.get("org.bluez.Device1")
+        if d and d.get("Name", "").upper().startswith("EDIFIER") and d.get("Name") != "EDIFIER BLE":
+            return d["Address"]
+
+
+def read_noise(t):
+    """(mode name, ambient level or None) as reported by the headphones, or (None, None)."""
+    p = t.transact(CMD_NOISE_READ)
+    if not p or len(p) < 2 or p[0] != 0xB5:
+        return None, None
+    level = LEVEL_BY_OFFSET.get(p[2] - 0xA0) if p[1] == MODES["ambient"] and len(p) >= 3 else None
+    return MODE_NAMES.get(p[1], hex(p[1])), level
+
+
+def get_status(t):
+    st = {}
+    mode, level = read_noise(t)
+    if mode:
+        st["mode"] = mode
+    if level is not None:
+        st["ambient_level"] = level
+    if p := t.transact(CMD_BATTERY):
+        st["battery"] = min(100, p[0] ^ XOR)
+    if p := t.transact(CMD_FIRMWARE):
+        st["firmware"] = ".".join(str(b ^ XOR) for b in p[:3])
+    if p := t.transact(CMD_AUDIO_READ):
+        st["audio"] = AUDIO_NAMES.get(p[0], hex(p[0]))
+    if p := t.transact(CMD_EQ_READ):
+        st["eq"] = EQ_NAMES.get(p[0], hex(p[0]))
+    st["mac"] = classic_mac()
+    st["ble_mac"] = t.address
+    return st
+
+
+def set_and_verify(t, set_cmd, read_cmd, value, tries=3):
+    """The headphones ack a write before applying it, so read the value back and retry if it did not stick."""
+    for _ in range(tries):
+        t.transact(set_cmd, bytes([value]))
+        time.sleep(0.3)
+        if (p := t.transact(read_cmd)) and p[0] == value:
+            return
+    die("headphones did not apply the setting")
+
+
+def set_noise(t, name, level=None, tries=4):
+    """Set noise mode (and ambient level). The ack comes before the change is applied, so read it back."""
+    for _ in range(tries + 1):
+        mode, cur = read_noise(t)
+        if mode == name and (level is None or cur == level):
+            return
+        if mode != name:
+            t.transact(CMD_NOISE, bytes([0xB5, MODES[name]]))
+        else:
+            t.transact(CMD_NOISE, bytes([0xB5, MODES["ambient"], 0xA0 + AMBIENT_OFFSET[level]]))
+        time.sleep(0.4)
+    die("headphones did not apply the setting")
+
+
+def pw_card():
+    """Return (id, active profile name, {profile name: index}) of the Edifier card in PipeWire."""
+    if not shutil.which("pw-dump") or not shutil.which("wpctl"):
+        die("pw-dump/wpctl not found (PipeWire required for codec switching)")
+    for o in json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True).stdout):
+        p = o.get("info", {}).get("props", {})
+        if o.get("type") == "PipeWire:Interface:Device" and "EDIFIER" in str(p.get("device.description", "")).upper() \
+                and str(p.get("device.name", "")).startswith("bluez_card"):
+            par = o["info"].get("params", {})
+            if par.get("Profile") and par.get("EnumProfile"):
+                return o["id"], par["Profile"][0]["name"], {x["name"]: x["index"] for x in par["EnumProfile"]}
+    die("Edifier audio card not found in PipeWire (connected as audio device?)")
+
+
+def set_codec(want_name):
+    cid, active, profiles = pw_card()
+    want = CODECS[want_name]
+    if want not in profiles:
+        die(f"profile {want} not offered by the device")
+    if subprocess.run(["wpctl", "set-profile", str(cid), str(profiles[want])]).returncode:
+        die("wpctl could not switch the profile")
+    for _ in range(30):  # the profile switch is applied asynchronously
+        if (active := pw_card()[1]) == want:
+            break
+        time.sleep(0.1)
+    return active
+
+
+# ---------------------------------------------------------------- command line
+def parse_command(args):
+    """Validate the arguments before touching Bluetooth; returns (command, argument)."""
+    if not args or args[0] in ("-h", "--help"):
+        return "help", None
+    if args[0] in ("-V", "--version"):
+        return "version", None
+    name, rest = ALIASES.get(args[0], args[0]), args[1:2]
+    if name in MODES or name in ("cycle", "status", "battery"):
+        return name, None
+    if name == "codec":
+        if rest and rest[0] not in CODECS:
+            die(f"codec must be one of: {', '.join(CODECS)}")
+        return name, rest[0] if rest else None
+    if name == "ambient-level":
+        try:
+            level = int(rest[0])
+        except (IndexError, ValueError):
+            die("usage: edifier-control ambient-level {-3..3}")
+        if level not in AMBIENT_OFFSET:
+            die("level must be -3..3")
+        return name, level
+    if name in ("audio", "eq"):
+        table = AUDIO if name == "audio" else EQ
+        if not rest or rest[0] not in table:
+            die(f"usage: edifier-control {name} {{{'|'.join(table)}}}")
+        return name, rest[0]
+    die(f"unknown command: {args[0]}\n{USAGE}")
+
+
+def execute(t, name, arg):
+    if name in MODES:
+        set_noise(t, name)
+        print(f"mode: {name}")
+    elif name == "cycle":
+        mode = read_noise(t)[0]
+        nxt = CYCLE[(CYCLE.index(mode) + 1) % len(CYCLE)] if mode in CYCLE else "anc"
+        set_noise(t, nxt)
+        print(f"mode: {nxt}")
+    elif name == "ambient-level":
+        set_noise(t, "ambient", arg)
+        print(f"ambient level: {arg}")
+    elif name in ("audio", "eq"):
+        if name == "audio":
+            set_and_verify(t, CMD_AUDIO_SET, CMD_AUDIO_READ, AUDIO[arg])
+        else:
+            set_and_verify(t, CMD_EQ_SET, CMD_EQ_READ, EQ[arg])
+        print(f"{name}: {arg}")
+    elif name == "status":
+        print(json.dumps(get_status(t)))
+    elif name == "battery":
+        print(f"{get_status(t).get('battery')}%")
+
+
+def main():
+    name, arg = parse_command(sys.argv[1:])
+    if name == "help":
+        print(USAGE)
+    elif name == "version":
+        print(f"edifier-control {__version__}")
+    elif name == "codec":  # PipeWire only, no Bluetooth link needed
+        names = {v: k for k, v in CODECS.items()}
+        active = set_codec(arg) if arg else pw_card()[1]
+        print(f"codec: {names.get(active, active)}")
+    else:
+        with single_instance():
+            t = BLE()
+            try:
+                execute(t, name, arg)
+            finally:
+                t.close()
+
+
+def run():
+    """Entry point: turn unexpected failures into one readable line (set EDIFIER_DEBUG=1 for the traceback)."""
+    try:
+        main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as e:
+        if os.environ.get("EDIFIER_DEBUG"):
+            raise
+        msg = e.message if isinstance(e, GLib.Error) else f"{type(e).__name__}: {e}"
+        die(f"Bluetooth/system error: {msg}")
+
+
+if __name__ == "__main__":
+    run()

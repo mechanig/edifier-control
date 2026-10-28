@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82c4"/>
+      <stop offset="1" stop-color="#1e3f6e"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- headband -->
+  <path d="M35 78 V62 a29 29 0 0 1 58 0 V78" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+  <!-- ear cups -->
+  <rect x="24" y="70" width="23" height="38" rx="10" fill="#ffffff"/>
+  <rect x="81" y="70" width="23" height="38" rx="10" fill="#ffffff"/>
+  <!-- equaliser bars between the cups -->
+  <rect x="53" y="82" width="6" height="16" rx="3" fill="#ffffff" fill-opacity="0.85"/>
+  <rect x="61" y="74" width="6" height="32" rx="3" fill="#ffffff" fill-opacity="0.85"/>
+  <rect x="69" y="84" width="6" height="12" rx="3" fill="#ffffff" fill-opacity="0.85"/>
+</svg>

@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Edifier Control — W820NB Plus (2025): GTK4/libadwaita window (wraps the `edifier-control` CLI)."""
+import os, sys
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _d in (_here, os.path.join(_here, "..", "share", "edifier-control"), os.path.expanduser("~/.local/share/edifier-control")):
+    if os.path.exists(os.path.join(_d, "edifier_common.py")):
+        sys.path.insert(0, _d)
+        break
+import edifier_i18n as i18n
+from edifier_common import APP_NAME, GROUPS, MODEL, TITLE, Backend
+from edifier_panel import PanelIcon
+
+REFRESH_SECONDS = 300  # how often the panel icon re-reads the headphones
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app, lang):
+        super().__init__(application=app, title=TITLE, default_width=460, default_height=760)
+        self.i18n = i18n.Translator(lang)
+        self.tr = self.i18n.tr  # unknown keys (proper names) stay as they are
+        self.updating = False   # set while we change widgets ourselves, so their handlers stay quiet
+        self.ambient_timer = 0
+        self.mode = None        # last noise mode reported by the headphones
+        self.groups = {}        # status key -> {value: button}
+        self.backend = app.backend
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=16, margin_bottom=16,
+                      margin_start=16, margin_end=16)
+        header = self._build_header(app, lang)
+        box.append(self._build_info())
+        for key, cmd, title, items in GROUPS:
+            self._build_group(box, key, cmd, title, items)
+        self.status = Gtk.Label(label="", xalign=0, wrap=True)
+        self.status.add_css_class("dim-label")
+        box.append(self.status)
+
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.set_child(box)
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(scroll)
+        self.set_content(view)
+        self.connect("close-request", lambda _w: app.on_window_close())
+        if app.last_status:
+            self.show(app.last_status)
+        self.on_busy(self.backend.busy)
+        self.backend.refresh()
+
+    # --- construction
+    def _build_header(self, app, lang):
+        header = Adw.HeaderBar(title_widget=Adw.WindowTitle(title=APP_NAME, subtitle=MODEL))  # two lines: fits a narrow window
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=self.tr("refresh"))
+        refresh.connect("clicked", lambda *_: self.backend.refresh())
+        header.pack_start(refresh)
+
+        # language lives in the header menu (the "..." button), one entry per file in locales/
+        langs = Gio.Menu()
+        for code, name in i18n.available().items():
+            langs.append(name, f"win.lang::{code}")
+        menu = Gio.Menu()
+        menu.append_section(self.tr("language"), langs)
+        action = Gio.SimpleAction.new_stateful("lang", GLib.VariantType("s"), GLib.Variant("s", lang))
+        action.connect("activate", lambda _a, v: v.get_string() != lang and GLib.idle_add(app.set_lang, v.get_string()))
+        self.add_action(action)
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text=self.tr("menu")))
+        self.spinner = Gtk.Spinner()
+        header.pack_end(self.spinner)
+        return header
+
+    def _build_info(self):
+        grid = Gtk.Grid(column_spacing=12, row_spacing=2)
+        self.info = {}
+        for row, key in enumerate(["battery", "firmware", "mac", "ble_mac"]):
+            title = Gtk.Label(label=self.tr(key), xalign=0)
+            title.add_css_class("dim-label")
+            grid.attach(title, 0, row, 1, 1)
+            value = Gtk.Label(label="—", xalign=0, selectable=True, hexpand=key != "battery")
+            self.info[key] = value
+            if key == "battery":
+                cell = Gtk.Box(spacing=10)
+                cell.append(value)
+                cell.append(self._build_battery_bar())
+                grid.attach(cell, 1, row, 1, 1)
+            else:
+                grid.attach(value, 1, row, 1, 1)
+        return grid
+
+    def _build_battery_bar(self):
+        bar = self.battery_bar = Gtk.LevelBar(min_value=0, max_value=100, hexpand=True, valign=Gtk.Align.CENTER)
+        for name in (Gtk.LEVEL_BAR_OFFSET_LOW, Gtk.LEVEL_BAR_OFFSET_HIGH, Gtk.LEVEL_BAR_OFFSET_FULL):
+            bar.remove_offset_value(name)
+        bar.add_offset_value("low", 20)    # red
+        bar.add_offset_value("high", 50)   # yellow
+        bar.add_offset_value("full", 100)  # green
+        return bar
+
+    def _build_group(self, box, key, cmd, title, items):
+        label = Gtk.Label(label=self.tr(title), xalign=0, margin_top=6)
+        label.add_css_class("heading")
+        box.append(label)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3,
+                           column_spacing=8, row_spacing=8, homogeneous=True)
+        first, buttons = None, {}
+        for value, text in items:
+            button = Gtk.ToggleButton(label=self.tr(text))
+            if first:
+                button.set_group(first)
+            first = first or button
+            button.connect("toggled", self.on_toggle, cmd, value)
+            buttons[value] = button
+            flow.append(button)
+        self.groups[key] = buttons
+        box.append(flow)
+        if key == "mode":
+            self._build_ambient_slider(box)
+
+    def _build_ambient_slider(self, box):
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -3, 3, 1)
+        self.scale.set_digits(0)
+        self.scale.set_round_digits(0)  # snap to whole levels while dragging
+        for level in range(-3, 4):
+            self.scale.add_mark(level, Gtk.PositionType.BOTTOM, str(level))
+        self.scale.connect("value-changed", self.on_scale)
+        box.append(Gtk.Label(label=self.tr("ambient_level"), xalign=0))
+        box.append(self.scale)
+
+    # --- backend callbacks
+    def on_busy(self, pending):
+        if pending:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+        self.update_slider()
+
+    def update_slider(self):
+        """The slider is usable only in ambient mode and while no command is waiting for the headphones."""
+        self.scale.set_sensitive(self.mode == "ambient" and self.backend.busy == 0)
+
+    def show_error(self, text):
+        # None means the CLI printed something that is not a status reply
+        self.status.set_text(self.tr("bad_reply") if text is None else self.i18n.error(text) or self.tr("error"))
+
+    def select(self, key, value):
+        if button := self.groups[key].get(value):
+            self.set_quietly(button.set_active, True)
+
+    def show_codec(self, codec):
+        self.select("codec", codec)
+
+    def set_quietly(self, setter, *args):
+        self.updating = True
+        setter(*args)
+        self.updating = False
+
+    def show(self, st):
+        self.status.set_text("")
+        for key, label in self.info.items():
+            val = st.get(key)
+            label.set_text("—" if val is None else f"{val}%" if key == "battery" else str(val))
+        if st.get("battery") is not None:
+            self.battery_bar.set_value(st["battery"])
+        for key in ("mode", "audio", "eq"):
+            if st.get(key):
+                self.select(key, st[key])
+        if st.get("ambient_level") is not None:
+            self.set_quietly(self.scale.set_value, st["ambient_level"])
+        self.mode = st.get("mode")
+        self.update_slider()
+        for button in self.groups["eq"].values():  # spatial sound takes over the equaliser
+            button.set_sensitive(st.get("audio") != "spatial")
+
+    # --- user input
+    def on_toggle(self, button, cmd, value):
+        if button.get_active() and not self.updating:
+            self.backend.run(*([cmd] if cmd else []), value)
+
+    def on_scale(self, scale):
+        if self.updating:
+            return
+        snapped = round(scale.get_value())
+        if scale.get_value() != snapped:  # keep the thumb on whole levels, whatever the widget allows
+            self.set_quietly(scale.set_value, snapped)
+        if self.ambient_timer:
+            GLib.source_remove(self.ambient_timer)
+        self.ambient_timer = GLib.timeout_add(400, self.send_level)  # debounce while dragging
+
+    def send_level(self):
+        self.ambient_timer = 0
+        self.backend.run("ambient-level", str(round(self.scale.get_value())))
+        return False
+
+
+def panel_icon_name():
+    """Our own monochrome icon when the theme has it (installed), else a stock headphones icon."""
+    theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+    return "edifier-control-symbolic" if theme.has_icon("edifier-control-symbolic") else "audio-headphones-symbolic"
+
+
+class App(Adw.Application):
+    """One process: the window, the top-bar icon and one Backend shared by both."""
+
+    def __init__(self):
+        super().__init__(application_id="local.edifier.control")
+        self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                             "Start with only the top-bar icon, no window", None)
+        self.connect("handle-local-options", self.on_local_options)
+        self.background = False
+        self.window = None
+        self.last_status = None
+        self.lang = i18n.detect()
+
+    def on_local_options(self, _app, options):
+        self.background = options.contains("background")
+        return -1  # carry on
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        Gtk.Window.set_default_icon_name("edifier-control")
+        self.backend = Backend(self.on_status, self.on_codec, self.on_error, self.on_busy)
+        self.panel = PanelIcon(i18n.Translator(self.lang), self.backend, panel_icon_name(), self.open_window, self.quit)
+        self.hold()  # the icon keeps the application alive while the window is hidden
+        GLib.timeout_add_seconds(REFRESH_SECONDS, lambda: self.backend.refresh() or True)
+        self.backend.refresh()
+
+    def do_activate(self):
+        if self.background:
+            self.background = False  # only the first start is silent; launching again opens the window
+            if self.panel.available:
+                return
+        self.open_window()
+
+    def do_shutdown(self):
+        self.backend.close()
+        Adw.Application.do_shutdown(self)
+
+    def open_window(self):
+        if not self.window:
+            self.window = Window(self, self.lang)
+            self.window.connect("destroy", lambda _w: setattr(self, "window", None))
+        self.window.present()
+
+    def on_window_close(self):
+        """Hide to the panel when there is one; without a panel the window is the only way in, so quit."""
+        if self.panel.available:
+            self.window.set_visible(False)
+            return True   # handled: do not destroy
+        self.quit()
+        return False
+
+    def set_lang(self, lang):
+        i18n.save(lang)
+        self.lang = lang
+        old, self.window = self.window, None
+        if old:
+            old.destroy()
+        self.panel.rebuild(i18n.Translator(lang))
+        self.open_window()
+
+    # --- results from the backend go to the panel and, if open, the window
+    def _targets(self):
+        return [self.panel] + ([self.window] if self.window else [])
+
+    def on_status(self, status):
+        self.last_status = status
+        for target in self._targets():
+            target.show(status)
+
+    def on_codec(self, codec):
+        for target in self._targets():
+            target.show_codec(codec)
+
+    def on_error(self, text):
+        for target in self._targets():
+            target.show_error(text)
+
+    def on_busy(self, pending):
+        if self.window:
+            self.window.on_busy(pending)
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

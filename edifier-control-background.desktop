@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Edifier Control — W820NB Plus (2025) (top-bar icon)
+Comment=Start the top-bar icon without opening the window
+Comment[uk]=Запустити іконку в панелі без відкриття вікна
+Exec=edifier-control-gui --background
+Icon=edifier-control
+Terminal=false
+NoDisplay=true
+Categories=AudioVideo;Audio;

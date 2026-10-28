@@ -1,0 +1,11 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: edifier-control
+
+Files: *
+Copyright: 2026 Oleksandr Yarmoliuk
+License: UNKNOWN
+ No license has been chosen for this software yet.
+ .
+ The protocol used to talk to the headphones was learned from the projects
+ https://github.com/wh201906/mEDIFIER (MIT) and https://github.com/Klinkore/mEDIFIER.
+ No source code from them is included.

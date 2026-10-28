@@ -1,0 +1,20 @@
+Package: edifier-control
+Version: @VERSION@
+Section: sound
+Priority: optional
+Architecture: all
+Maintainer: Oleksandr Yarmoliuk <sashayarmolyk@gmail.com>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gir1.2-dbusmenu-glib-0.4, bluez
+Recommends: pipewire-bin, wireplumber, gnome-shell-extension-appindicator
+Description: Control Edifier W820NB Plus (2025) headphones from Linux
+ Switch noise cancelling (ANC high or medium, wind, ambient with a level),
+ the sound mode (game, music, spatial), the equaliser preset and the A2DP
+ codec (LDAC, SBC-XQ, SBC), and read the battery level and firmware version.
+ .
+ Includes a command line tool and a GTK4 window with a top-bar icon that has the same menu.
+ The interface is available in English and Ukrainian; more languages can be
+ added as JSON files.
+ .
+ Only the Edifier W820NB Plus (2025) is supported: other models use other
+ protocols.
