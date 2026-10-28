@@ -19,9 +19,9 @@ Ubuntu (or another GNOME system) with BlueZ and PipeWire:
 The headphones must be paired, switched on and connected to this PC.
 
 ## Install
-The Debian package is attached to each [GitHub release](../../releases). The repository is private, so download it with `gh`:
+The Debian package is attached to each [GitHub release](https://github.com/mechanig/edifier-control/releases):
 
-    gh release download v0.0.2 --repo mechanig/edifier-control --pattern '*.deb'
+    wget https://github.com/mechanig/edifier-control/releases/download/v0.0.2/edifier-control_0.0.2_all.deb
     sudo apt install --reinstall ./edifier-control_0.0.2_all.deb
 
 To build the package yourself, run `packaging/build-deb.sh`; it writes `dist/edifier-control_<version>_all.deb`.
@@ -77,3 +77,6 @@ Close Edifier Connect on other devices first, it may hold the BLE link.
     python3 tests/smoke.py                    # real headphones: runs every command and restores the previous state
 
 The panel test needs a desktop session with a status notifier host and is skipped otherwise.
+
+## License
+MIT, see [LICENSE](LICENSE).

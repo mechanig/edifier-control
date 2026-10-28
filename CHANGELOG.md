@@ -5,6 +5,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), ver
 
 ## [Unreleased]
 
+### Added
+- MIT license (`LICENSE`); the Debian `copyright` file now states it.
+
 ## [0.0.2] - 2026-10-28
 
 First release. Developed and tested on the Edifier W820NB Plus (2025) on Ubuntu with GNOME.
